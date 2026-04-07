@@ -2,12 +2,16 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/foonly/bookmarks-api/internal/models"
 	"github.com/foonly/bookmarks-api/internal/store"
@@ -25,9 +29,20 @@ func setupTest(t *testing.T) (http.Handler, store.Store) {
 	return r, s
 }
 
+func signRequest(t *testing.T, secret string, ts int64, body []byte) string {
+	hasher := sha256.New()
+	hasher.Write(body)
+	bodyHash := hex.EncodeToString(hasher.Sum(nil))
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(fmt.Sprintf("%d%s", ts, bodyHash)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func TestSyncAPI(t *testing.T) {
 	router, _ := setupTest(t)
 	syncID := "test-user-123"
+	signingSecret := "super-secret"
 	blobV1 := "encrypted-payload-v1"
 	blobV2 := "encrypted-payload-v2"
 
@@ -42,13 +57,22 @@ func TestSyncAPI(t *testing.T) {
 	})
 
 	t.Run("UploadV1", func(t *testing.T) {
-		body, _ := json.Marshal(models.SyncRequest{Data: blobV1})
+		body, _ := json.Marshal(models.SyncRequest{
+			Data:               blobV1,
+			RegistrationSecret: signingSecret,
+		})
+		ts := time.Now().Unix()
+		sig := signRequest(t, signingSecret, ts, body)
+
 		req := httptest.NewRequest("POST", "/api/v1/sync/"+syncID, bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusCreated {
-			t.Errorf("expected status 201, got %d", rr.Code)
+			t.Errorf("expected status 201, got %d: %s", rr.Code, rr.Body.String())
 		}
 	})
 
@@ -73,12 +97,18 @@ func TestSyncAPI(t *testing.T) {
 
 	t.Run("UploadV2", func(t *testing.T) {
 		body, _ := json.Marshal(models.SyncRequest{Data: blobV2})
+		ts := time.Now().Unix() + 1 // Ensure newer timestamp
+		sig := signRequest(t, signingSecret, ts, body)
+
 		req := httptest.NewRequest("POST", "/api/v1/sync/"+syncID, bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusCreated {
-			t.Errorf("expected status 201, got %d", rr.Code)
+			t.Errorf("expected status 201, got %d: %s", rr.Code, rr.Body.String())
 		}
 	})
 
@@ -102,14 +132,21 @@ func TestSyncAPI(t *testing.T) {
 	})
 
 	t.Run("PayloadTooLarge", func(t *testing.T) {
-		// Create a payload that exceeds MaxPayloadSize (1MB)
 		largeData := strings.Repeat("a", MaxPayloadSize+1024)
-		body, _ := json.Marshal(models.SyncRequest{Data: largeData})
+		body, _ := json.Marshal(models.SyncRequest{
+			Data:               largeData,
+			RegistrationSecret: "new-secret",
+		})
+		ts := time.Now().Unix()
+		sig := signRequest(t, "new-secret", ts, body)
+
 		req := httptest.NewRequest("POST", "/api/v1/sync/large-id", bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 
-		// MaxBytesReader error results in 400 Bad Request in our current implementation
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected status 400 for oversized payload, got %d", rr.Code)
 		}
@@ -117,20 +154,36 @@ func TestSyncAPI(t *testing.T) {
 
 	t.Run("RateLimiting", func(t *testing.T) {
 		limitID := "rate-limit-test"
-		// 5 POSTs per minute are allowed
+		limitSecret := "limit-secret"
+
 		for i := 0; i < 5; i++ {
-			body, _ := json.Marshal(models.SyncRequest{Data: "data"})
+			reqBody := models.SyncRequest{Data: "data"}
+			if i == 0 {
+				reqBody.RegistrationSecret = limitSecret
+			}
+			body, _ := json.Marshal(reqBody)
+			ts := time.Now().Unix() + int64(i)
+			sig := signRequest(t, limitSecret, ts, body)
+
 			req := httptest.NewRequest("POST", "/api/v1/sync/"+limitID, bytes.NewBuffer(body))
+			req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+			req.Header.Set("X-Sync-Signature", sig)
+
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
 			if rr.Code != http.StatusCreated {
-				t.Fatalf("expected 201 on attempt %d, got %d", i+1, rr.Code)
+				t.Fatalf("expected 201 on attempt %d, got %d: %s", i+1, rr.Code, rr.Body.String())
 			}
 		}
 
-		// 6th POST should be rejected
 		body, _ := json.Marshal(models.SyncRequest{Data: "data"})
+		ts := time.Now().Unix() + 10
+		sig := signRequest(t, limitSecret, ts, body)
+
 		req := httptest.NewRequest("POST", "/api/v1/sync/"+limitID, bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusTooManyRequests {
@@ -142,10 +195,20 @@ func TestSyncAPI(t *testing.T) {
 func TestFetchSpecificVersion(t *testing.T) {
 	router, _ := setupTest(t)
 	syncID := "version-test"
+	secret := "version-secret"
 
 	// Upload one version
-	body, _ := json.Marshal(models.SyncRequest{Data: "v1"})
+	body, _ := json.Marshal(models.SyncRequest{
+		Data:               "v1",
+		RegistrationSecret: secret,
+	})
+	tsHeader := time.Now().Unix()
+	sig := signRequest(t, secret, tsHeader, body)
+
 	req := httptest.NewRequest("POST", "/api/v1/sync/"+syncID, bytes.NewBuffer(body))
+	req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", tsHeader))
+	req.Header.Set("X-Sync-Signature", sig)
+
 	router.ServeHTTP(httptest.NewRecorder(), req)
 
 	// Get latest to find timestamp

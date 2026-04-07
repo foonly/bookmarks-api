@@ -1,10 +1,17 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/foonly/bookmarks-api/internal/models"
 	"github.com/foonly/bookmarks-api/internal/store"
@@ -53,12 +60,32 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit request body size
+	// 1. Validate Timestamp Header
+	tsHeader := r.Header.Get("X-Sync-Timestamp")
+	ts, err := strconv.ParseInt(tsHeader, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid or missing X-Sync-Timestamp", http.StatusUnauthorized)
+		return
+	}
+
+	// 2. Check Timestamp Window (5 minutes)
+	now := time.Now().Unix()
+	if math.Abs(float64(now-ts)) > 300 {
+		http.Error(w, "timestamp expired or invalid", http.StatusUnauthorized)
+		return
+	}
+
+	// Limit request body size and read it for hashing
 	r.Body = http.MaxBytesReader(w, r.Body, MaxPayloadSize)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body or payload too large", http.StatusBadRequest)
+		return
+	}
 
 	var req models.SyncRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body or payload too large", http.StatusBadRequest)
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
@@ -67,8 +94,59 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.store.SaveBlob(r.Context(), id, req.Data)
+	// 3. Retrieve Identity
+	identity, err := h.store.GetIdentity(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// 4. Registration Path
+			if req.RegistrationSecret == "" {
+				http.Error(w, "registration secret required for new ID", http.StatusUnauthorized)
+				return
+			}
+
+			if err := h.store.CreateIdentity(r.Context(), id, req.RegistrationSecret); err != nil {
+				http.Error(w, "failed to create identity", http.StatusInternalServerError)
+				return
+			}
+			identity = &models.SyncIdentity{
+				ID:            id,
+				SigningSecret: req.RegistrationSecret,
+				LastTimestamp: 0,
+			}
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 5. Replay Protection
+	if ts <= identity.LastTimestamp {
+		http.Error(w, "timestamp must be newer than previous request", http.StatusUnauthorized)
+		return
+	}
+
+	// 6. Signature Verification
+	sigHeader := r.Header.Get("X-Sync-Signature")
+	if sigHeader == "" {
+		http.Error(w, "missing X-Sync-Signature", http.StatusUnauthorized)
+		return
+	}
+
+	hasher := sha256.New()
+	hasher.Write(bodyBytes)
+	bodyHash := hex.EncodeToString(hasher.Sum(nil))
+
+	mac := hmac.New(sha256.New, []byte(identity.SigningSecret))
+	mac.Write([]byte(fmt.Sprintf("%d%s", ts, bodyHash)))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(sigHeader), []byte(expectedSig)) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// 7. Save Data (this also updates identity timestamp for replay protection)
+	if err := h.store.SaveBlob(r.Context(), id, req.Data, ts); err != nil {
 		http.Error(w, "failed to save sync data", http.StatusInternalServerError)
 		return
 	}

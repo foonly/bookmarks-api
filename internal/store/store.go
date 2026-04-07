@@ -12,8 +12,14 @@ var ErrNotFound = errors.New("sync data not found")
 
 // Store defines the interface for persisting encrypted bookmark blobs and their history.
 type Store interface {
+	// GetIdentity retrieves identity information for a sync ID.
+	GetIdentity(ctx context.Context, id string) (*models.SyncIdentity, error)
+
+	// CreateIdentity stores a new identity with a signing secret.
+	CreateIdentity(ctx context.Context, id string, secret string) error
+
 	// SaveBlob stores a new encrypted blob for the given ID and handles pruning of old versions.
-	SaveBlob(ctx context.Context, id string, data string) error
+	SaveBlob(ctx context.Context, id string, data string, ts int64) error
 
 	// GetLatestBlob retrieves the most recent blob for the given ID.
 	GetLatestBlob(ctx context.Context, id string) (*models.SyncBlob, error)

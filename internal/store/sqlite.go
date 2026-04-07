@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/foonly/bookmarks-api/internal/models"
 	_ "modernc.org/sqlite"
@@ -22,7 +21,7 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
 
-	// Create table for storing blobs
+	// Create tables for storing blobs and identities
 	query := `
 	CREATE TABLE IF NOT EXISTS sync_blobs (
 		id TEXT NOT NULL,
@@ -30,6 +29,12 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 		timestamp INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_sync_id_ts ON sync_blobs (id, timestamp DESC);
+
+	CREATE TABLE IF NOT EXISTS sync_identities (
+		id TEXT PRIMARY KEY,
+		signing_secret TEXT NOT NULL,
+		last_timestamp INTEGER NOT NULL DEFAULT 0
+	);
 	`
 	if _, err := db.Exec(query); err != nil {
 		return nil, fmt.Errorf("failed to create table: %w", err)
@@ -41,19 +46,45 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 	}, nil
 }
 
-func (s *sqliteStore) SaveBlob(ctx context.Context, id string, data string) error {
+func (s *sqliteStore) GetIdentity(ctx context.Context, id string) (*models.SyncIdentity, error) {
+	var identity models.SyncIdentity
+	query := "SELECT id, signing_secret, last_timestamp FROM sync_identities WHERE id = ?"
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&identity.ID, &identity.SigningSecret, &identity.LastTimestamp)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get identity: %w", err)
+	}
+	return &identity, nil
+}
+
+func (s *sqliteStore) CreateIdentity(ctx context.Context, id string, secret string) error {
+	query := "INSERT INTO sync_identities (id, signing_secret, last_timestamp) VALUES (?, ?, 0)"
+	_, err := s.db.ExecContext(ctx, query, id, secret)
+	if err != nil {
+		return fmt.Errorf("failed to create identity: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) SaveBlob(ctx context.Context, id string, data string, ts int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	ts := time.Now().UnixMilli()
-
 	// Insert new blob
 	_, err = tx.ExecContext(ctx, "INSERT INTO sync_blobs (id, blob, timestamp) VALUES (?, ?, ?)", id, data, ts)
 	if err != nil {
 		return fmt.Errorf("failed to insert blob: %w", err)
+	}
+
+	// Update identity timestamp for replay protection
+	_, err = tx.ExecContext(ctx, "UPDATE sync_identities SET last_timestamp = ? WHERE id = ?", ts, id)
+	if err != nil {
+		return fmt.Errorf("failed to update identity timestamp: %w", err)
 	}
 
 	// Prune old versions: Keep only the latest N versions
