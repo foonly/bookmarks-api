@@ -6,6 +6,8 @@ A decentralized, privacy-focused backend for synchronizing data across devices. 
 
 - **End-to-End Encryption Support**: Designed to store opaque, client-side encrypted blobs (AES-GCM).
 - **History Management**: Automatically retains the last 10 versions of your sync data for easy recovery.
+- **Automated Cleanup**: Built-in logic to remove stale and abandoned data based on usage patterns.
+- **Usage Statistics**: Publicly accessible endpoint to monitor the growth and health of the service.
 - **Rate Limiting**: Built-in protection against abuse with per-ID rate limiting (5 POSTs/min, 30 GETs/min).
 - **Lightweight & Portable**: Written in Go with a CGO-free SQLite implementation (`modernc.org/sqlite`).
 - **CORS Ready**: Configured to work with frontend applications out of the box.
@@ -19,7 +21,12 @@ A decentralized, privacy-focused backend for synchronizing data across devices. 
 - `GET /api/v1/sync/:id/history`: List timestamps for all available historical versions.
 - `GET /api/v1/sync/:id/:timestamp`: Retrieve a specific historical version by its timestamp.
 
-### Response Format
+### Management Endpoints
+
+- `GET /api/v1/stats`: Retrieve public usage statistics (totals and 24h activity).
+- `GET /health`: Basic health check endpoint.
+
+### Response Format (Sync)
 
 ```json
 {
@@ -28,6 +35,32 @@ A decentralized, privacy-focused backend for synchronizing data across devices. 
 	"timestamp": 1625000000000
 }
 ```
+
+### Response Format (Stats)
+
+```json
+{
+	"totals": {
+		"identities": 1250,
+		"blobs": 5400,
+		"total_size_bytes": 104857600
+	},
+	"activity": {
+		"identities_created_24h": 25,
+		"blobs_created_24h": {
+			"current": 150,
+			"previous": 130
+		}
+	}
+}
+```
+
+## Cleanup Policy
+
+To keep the database lean, the API implements a background cleanup worker that runs every 24 hours. Identities and their associated blobs are deleted based on the following rules:
+
+1.  **Short-term Usage**: If an identity was used for less than 48 hours (from creation to last access) and has been inactive for more than **14 days**, it is deleted.
+2.  **Long-term Usage**: If an identity was used for 48 hours or more and has been inactive for more than **90 days**, it is deleted.
 
 ## Getting Started
 
@@ -79,9 +112,9 @@ go test -v ./internal/api/...
 
 ## Architecture
 
-- **`cmd/api`**: Entry point and server lifecycle management.
+- **`cmd/api`**: Entry point, server lifecycle, and background cleanup worker.
 - **`internal/api`**: HTTP routing, handlers, and rate-limiting middleware.
-- **`internal/store`**: Persistence layer abstraction and SQLite implementation.
+- **`internal/store`**: Persistence layer abstraction and SQLite implementation with automated migrations.
 - **`internal/models`**: Shared data structures.
 
 ## Security
