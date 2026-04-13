@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -45,6 +46,7 @@ func (h *Handler) GetLatest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "sync id not found", http.StatusNotFound)
 			return
 		}
+		log.Printf("GetLatest(id=%s): %v", id, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -107,6 +109,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err := h.store.CreateIdentity(r.Context(), id, req.RegistrationSecret); err != nil {
+				log.Printf("Upload(id=%s): create identity error: %v", id, err)
 				http.Error(w, "failed to create identity", http.StatusInternalServerError)
 				return
 			}
@@ -116,6 +119,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 				LastTimestamp: 0,
 			}
 		} else {
+			log.Printf("Upload(id=%s): get identity error: %v", id, err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -149,6 +153,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Save Data (this also updates identity timestamp for replay protection)
 	if err := h.store.SaveBlob(r.Context(), id, req.Data, ts); err != nil {
+		log.Printf("Upload(id=%s): save blob error: %v", id, err)
 		http.Error(w, "failed to save sync data", http.StatusInternalServerError)
 		return
 	}
@@ -172,6 +177,7 @@ func (h *Handler) GetHistory(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no history found for this id", http.StatusNotFound)
 			return
 		}
+		log.Printf("GetHistory(id=%s): %v", id, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -198,6 +204,7 @@ func (h *Handler) GetVersion(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "version not found", http.StatusNotFound)
 			return
 		}
+		log.Printf("GetVersion(id=%s, ts=%d): %v", id, ts, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -211,6 +218,7 @@ func (h *Handler) GetVersion(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.store.GetStats(r.Context())
 	if err != nil {
+		log.Printf("GetStats: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -221,6 +229,7 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	response, err := json.Marshal(payload)
 	if err != nil {
+		log.Printf("respondWithJSON: %v", err)
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 		return
 	}

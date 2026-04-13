@@ -22,6 +22,12 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
 
+	// Optimize SQLite for concurrency and reliability
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"); err != nil {
+		return nil, fmt.Errorf("failed to configure sqlite: %w", err)
+	}
+
 	// Create tables for storing blobs and identities
 	query := `
 	CREATE TABLE IF NOT EXISTS sync_blobs (
