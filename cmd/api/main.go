@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,19 +12,19 @@ import (
 	"time"
 
 	"github.com/foonly/foonblob-api/internal/api"
+	"github.com/foonly/foonblob-api/internal/config"
 	"github.com/foonly/foonblob-api/internal/store"
 )
 
 func main() {
-	var (
-		port         = flag.Int("port", 8080, "HTTP port to listen on")
-		dsn          = flag.String("dsn", "sync.db", "SQLite database connection string")
-		historyLimit = flag.Int("history-limit", 10, "Maximum number of historical versions to keep per ID")
-	)
-	flag.Parse()
+	// Load configuration using Viper
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("failed to load configuration: %v", err)
+	}
 
 	// Initialize the persistence layer
-	s, err := store.NewSQLiteStore(*dsn, *historyLimit)
+	s, err := store.NewSQLiteStore(cfg.DSN, cfg.HistoryLimit)
 	if err != nil {
 		log.Fatalf("failed to initialize storage: %v", err)
 	}
@@ -55,11 +54,11 @@ func main() {
 	}()
 
 	// Initialize handlers and router
-	handler := api.NewHandler(s)
+	handler := api.NewHandler(s, cfg.StatsToken)
 	router := api.NewRouter(handler)
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", *port),
+		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      router,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -71,7 +70,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting server on port %d...", *port)
+		log.Printf("Starting server on port %d...", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %s\n", err)
 		}

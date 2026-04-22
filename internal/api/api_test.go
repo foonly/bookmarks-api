@@ -24,7 +24,7 @@ func setupTest(t *testing.T) (http.Handler, store.Store) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	h := NewHandler(s)
+	h := NewHandler(s, "")
 	r := NewRouter(h)
 	return r, s
 }

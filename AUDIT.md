@@ -14,7 +14,7 @@ This document provides a comprehensive audit of the `foonblob-api` project, cove
 
 - **Public Statistics Endpoint**: The `/api/v1/stats` endpoint is publicly accessible without any authentication. This leaks metadata about the system usage (total identities, blob counts, storage size).
 - **In-Memory Rate Limiting**: The rate limiter is in-memory. If the server restarts, all rate limit buckets are reset. In a multi-node deployment (if ever scaled), rate limits would not be shared.
-- **Rate Limiter Memory Leak**: The `RateLimiter` map in `internal/api/ratelimit.go` grows indefinitely. Every unique sync ID that interacts with the API creates a new entry in the map that is never pruned, which could lead to gradual memory exhaustion over time.
+- **Rate Limiter Memory Leak**: Resolved. The `RateLimiter` now includes a background cleanup worker that prunes inactive buckets every hour to prevent unbounded memory growth.
 - **Information Leakage in Logs**: The `Logger` middleware is enabled. Ensure that sensitive headers or body content are not logged in production environments.
 
 ### Findings: Low Priority
@@ -47,15 +47,15 @@ This document provides a comprehensive audit of the `foonblob-api` project, cove
 ### Phase 1: Immediate Security Fixes
 
 - [x] **Restrict CORS**: Implemented Dynamic CORS that locks sync IDs to their registration origin.
-- [ ] **Protect Stats**: Add a simple API key requirement or restrict `/api/v1/stats` to internal IP ranges.
+- [x] **Protect Stats**: Added Bearer token authentication via `stats_token` in config.
 - [ ] **Authenticate Reads**: Consider requiring an HMAC signature for GET requests as well, similar to the POST implementation, to prevent unauthorized access to blobs.
 
 ### Phase 2: Architectural Improvements
 
 - [ ] **Structured Logging**: Replace the standard `log` package with `log/slog` (available in Go 1.21+) to produce JSON logs for better observability.
-- [ ] **Configuration Management**: Move configuration (Port, DSN, History Limit) from flags to environment variables or a configuration file (e.g., using `viper` or `caarlos0/env`) to support containerized deployments (Docker/K8s).
+- [x] **Configuration Management**: Integrated Viper for YAML/Env configuration.
 - [ ] **Migration Tooling**: Integrate a migration tool like `golang-migrate` or `pressly/goose` to manage database schema versions formally.
-- [ ] **Fix Rate Limiter Leak**: Implement a TTL-based eviction or a LRU cache for the rate limiter map to prevent unbounded memory growth.
+- [x] **Fix Rate Limiter Leak**: Implemented a background cleanup worker in `internal/api/ratelimit.go` that prunes inactive buckets every hour.
 - [x] **Fix Go Version**: Correct the `go.mod` version to a stable release (e.g., `1.24.0`).
 
 ### Phase 3: Robustness & Scaling

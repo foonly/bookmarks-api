@@ -25,11 +25,15 @@ const (
 )
 
 type Handler struct {
-	store store.Store
+	store      store.Store
+	statsToken string
 }
 
-func NewHandler(s store.Store) *Handler {
-	return &Handler{store: s}
+func NewHandler(s store.Store, statsToken string) *Handler {
+	return &Handler{
+		store:      s,
+		statsToken: statsToken,
+	}
 }
 
 // DynamicCORS is a middleware that sets the Access-Control-Allow-Origin header
@@ -252,6 +256,14 @@ func (h *Handler) GetVersion(w http.ResponseWriter, r *http.Request) {
 
 // GetStats handles GET /api/v1/stats
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
+	if h.statsToken != "" {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer "+h.statsToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	stats, err := h.store.GetStats(r.Context())
 	if err != nil {
 		log.Printf("GetStats: %v", err)

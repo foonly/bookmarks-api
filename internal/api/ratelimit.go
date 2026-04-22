@@ -22,12 +22,34 @@ type bucket struct {
 	lastCheck time.Time
 }
 
-// NewRateLimiter creates a new rate limiter with the specified limits.
+// NewRateLimiter creates a new rate limiter with the specified limits and starts a cleanup worker.
 func NewRateLimiter(postsPerMin, getsPerMin int) *RateLimiter {
-	return &RateLimiter{
+	rl := &RateLimiter{
 		limits:      make(map[string]*bucket),
 		postsPerMin: postsPerMin,
 		getsPerMin:  getsPerMin,
+	}
+	go rl.cleanupWorker()
+	return rl
+}
+
+func (rl *RateLimiter) cleanupWorker() {
+	ticker := time.NewTicker(1 * time.Hour)
+	for range ticker.C {
+		rl.cleanup()
+	}
+}
+
+func (rl *RateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	for key, b := range rl.limits {
+		// If the bucket hasn't been accessed in 1 hour, remove it
+		if now.Sub(b.lastCheck) > 1*time.Hour {
+			delete(rl.limits, key)
+		}
 	}
 }
 
