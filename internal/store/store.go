@@ -16,7 +16,7 @@ type Store interface {
 	GetIdentity(ctx context.Context, id string) (*models.SyncIdentity, error)
 
 	// CreateIdentity stores a new identity with a signing secret.
-	CreateIdentity(ctx context.Context, id string, secret string) error
+	CreateIdentity(ctx context.Context, id string, secret string, origin string) error
 
 	// UpdateLastAccessed updates the last accessed timestamp for an identity.
 	UpdateLastAccessed(ctx context.Context, id string) error

@@ -40,6 +40,7 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 	CREATE TABLE IF NOT EXISTS sync_identities (
 		id TEXT PRIMARY KEY,
 		signing_secret TEXT NOT NULL,
+		allowed_origin TEXT NOT NULL DEFAULT '',
 		last_timestamp INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL DEFAULT 0,
 		last_accessed_at INTEGER NOT NULL DEFAULT 0
@@ -52,6 +53,7 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 	// Migrations for existing databases
 	_, _ = db.Exec("ALTER TABLE sync_identities ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE sync_identities ADD COLUMN last_accessed_at INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE sync_identities ADD COLUMN allowed_origin TEXT NOT NULL DEFAULT ''")
 
 	// Backfill initial values if needed
 	_, _ = db.Exec("UPDATE sync_identities SET created_at = last_timestamp WHERE created_at = 0 AND last_timestamp > 0")
@@ -66,8 +68,8 @@ func NewSQLiteStore(dsn string, historyLimit int) (Store, error) {
 
 func (s *sqliteStore) GetIdentity(ctx context.Context, id string) (*models.SyncIdentity, error) {
 	var identity models.SyncIdentity
-	query := "SELECT id, signing_secret, last_timestamp, created_at, last_accessed_at FROM sync_identities WHERE id = ?"
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&identity.ID, &identity.SigningSecret, &identity.LastTimestamp, &identity.CreatedAt, &identity.LastAccessedAt)
+	query := "SELECT id, signing_secret, allowed_origin, last_timestamp, created_at, last_accessed_at FROM sync_identities WHERE id = ?"
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&identity.ID, &identity.SigningSecret, &identity.AllowedOrigin, &identity.LastTimestamp, &identity.CreatedAt, &identity.LastAccessedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -77,10 +79,10 @@ func (s *sqliteStore) GetIdentity(ctx context.Context, id string) (*models.SyncI
 	return &identity, nil
 }
 
-func (s *sqliteStore) CreateIdentity(ctx context.Context, id string, secret string) error {
+func (s *sqliteStore) CreateIdentity(ctx context.Context, id string, secret string, origin string) error {
 	now := time.Now().Unix()
-	query := "INSERT INTO sync_identities (id, signing_secret, last_timestamp, created_at, last_accessed_at) VALUES (?, ?, 0, ?, ?)"
-	_, err := s.db.ExecContext(ctx, query, id, secret, now, now)
+	query := "INSERT INTO sync_identities (id, signing_secret, allowed_origin, last_timestamp, created_at, last_accessed_at) VALUES (?, ?, ?, 0, ?, ?)"
+	_, err := s.db.ExecContext(ctx, query, id, secret, origin, now, now)
 	if err != nil {
 		return fmt.Errorf("failed to create identity: %w", err)
 	}

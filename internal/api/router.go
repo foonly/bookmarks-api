@@ -23,23 +23,21 @@ func NewRouter(h *Handler) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	// CORS configuration
-	// In a production environment, you should restrict 'AllowedOrigins'
-	// to the specific domain of your foonblob application.
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization", "X-Sync-Timestamp", "X-Sync-Signature"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300, // Maximum value not ignored by any of major browsers
-	}))
-
 	// API Routes
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/stats", h.GetStats)
+		// Public Stats with standard CORS
+		r.Group(func(r chi.Router) {
+			r.Use(cors.Handler(cors.Options{
+				AllowedOrigins: []string{"*"},
+				AllowedMethods: []string{"GET", "OPTIONS"},
+				AllowedHeaders: []string{"Accept", "Content-Type"},
+			}))
+			r.Get("/stats", h.GetStats)
+		})
+
 		r.Route("/sync", func(r chi.Router) {
 			r.Route("/{id}", func(r chi.Router) {
+				r.Use(h.DynamicCORS) // Handles CORS dynamically based on ID
 				r.Use(limiter.Limit)
 				r.Get("/", h.GetLatest)
 				r.Post("/", h.Upload)
@@ -51,6 +49,7 @@ func NewRouter(h *Handler) http.Handler {
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})

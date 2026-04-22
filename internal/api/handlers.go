@@ -32,6 +32,35 @@ func NewHandler(s store.Store) *Handler {
 	return &Handler{store: s}
 }
 
+// DynamicCORS is a middleware that sets the Access-Control-Allow-Origin header
+// based on the allowed_origin stored for the given sync ID.
+func (h *Handler) DynamicCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id != "" {
+			identity, err := h.store.GetIdentity(r.Context(), id)
+			if err == nil && identity.AllowedOrigin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", identity.AllowedOrigin)
+				w.Header().Set("Vary", "Origin")
+			} else {
+				// Fallback to allow all if no specific origin is registered
+				// or during registration phase.
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			}
+		}
+
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Sync-Timestamp, X-Sync-Signature")
+			w.Header().Set("Access-Control-Max-Age", "300")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // GetLatest handles GET /api/v1/sync/:id
 func (h *Handler) GetLatest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -108,7 +137,13 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if err := h.store.CreateIdentity(r.Context(), id, req.RegistrationSecret); err != nil {
+			// Capture origin from request header if not explicitly provided in registration
+			origin := req.AllowedOrigin
+			if origin == "" {
+				origin = r.Header.Get("Origin")
+			}
+
+			if err := h.store.CreateIdentity(r.Context(), id, req.RegistrationSecret, origin); err != nil {
 				log.Printf("Upload(id=%s): create identity error: %v", id, err)
 				http.Error(w, "failed to create identity", http.StatusInternalServerError)
 				return
@@ -116,6 +151,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 			identity = &models.SyncIdentity{
 				ID:            id,
 				SigningSecret: req.RegistrationSecret,
+				AllowedOrigin: origin,
 				LastTimestamp: 0,
 			}
 		} else {

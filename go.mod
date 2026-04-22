@@ -1,6 +1,6 @@
 module github.com/foonly/foonblob-api
 
-go 1.26.1
+go 1.24.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
