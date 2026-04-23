@@ -242,6 +242,184 @@ func TestFetchSpecificVersion(t *testing.T) {
 	}
 }
 
+func TestOriginEnforcement(t *testing.T) {
+	router, _ := setupTest(t)
+	syncID := "origin-test-id"
+	secret := "origin-test-secret"
+	allowedOrigin := "https://example.com"
+	path := "/api/v1/sync/" + syncID
+
+	// Register the identity with an explicit allowed origin
+	t.Run("RegisterWithOrigin", func(t *testing.T) {
+		body, _ := json.Marshal(models.SyncRequest{
+			Data:               "initial-data",
+			RegistrationSecret: secret,
+			AllowedOrigin:      allowedOrigin,
+		})
+		ts := time.Now().Unix()
+		sig := signRequest(t, secret, ts, "POST", path, body)
+
+		req := httptest.NewRequest("POST", path, bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+		req.Header.Set("Origin", allowedOrigin)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("expected status 201, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("GetWithMatchingOrigin", func(t *testing.T) {
+		ts := time.Now().Unix() + 10
+		sig := signRequest(t, secret, ts, "GET", path, nil)
+
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+		req.Header.Set("Origin", allowedOrigin)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("expected status 200 for matching origin, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("GetWithMismatchedOrigin", func(t *testing.T) {
+		ts := time.Now().Unix() + 20
+		sig := signRequest(t, secret, ts, "GET", path, nil)
+
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+		req.Header.Set("Origin", "https://evil.com")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("expected status 403 for mismatched origin, got %d", rr.Code)
+		}
+	})
+
+	t.Run("GetWithNoOriginHeader", func(t *testing.T) {
+		ts := time.Now().Unix() + 30
+		sig := signRequest(t, secret, ts, "GET", path, nil)
+
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+		// No Origin header — non-browser / CLI clients must not be blocked
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("expected status 200 for request without Origin header, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("PreflightWithMismatchedOrigin", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", path, nil)
+		req.Header.Set("Origin", "https://evil.com")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("expected status 403 for preflight with mismatched origin, got %d", rr.Code)
+		}
+	})
+}
+
+func TestOriginValidation(t *testing.T) {
+	router, _ := setupTest(t)
+
+	tests := []struct {
+		name           string
+		origin         string
+		expectedStatus int
+	}{
+		{"WildcardRejected", "*", http.StatusBadRequest},
+		{"NoSchemeRejected", "example.com", http.StatusBadRequest},
+		{"FTPSchemeRejected", "ftp://example.com", http.StatusBadRequest},
+		{"HTTPAccepted", "http://example.com", http.StatusCreated},
+		{"HTTPSAccepted", "https://example.com", http.StatusCreated},
+		{"PathStripped", "https://example.org/some/path?q=1", http.StatusCreated},
+		{"PortPreserved", "https://example.net:8443", http.StatusCreated},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id := fmt.Sprintf("origin-valid-%d", i)
+			secret := "test-secret"
+			p := "/api/v1/sync/" + id
+			body, _ := json.Marshal(models.SyncRequest{
+				Data:               "data",
+				RegistrationSecret: secret,
+				AllowedOrigin:      tc.origin,
+			})
+			ts := time.Now().Unix() + int64(i)
+			sig := signRequest(t, secret, ts, "POST", p, body)
+
+			req := httptest.NewRequest("POST", p, bytes.NewBuffer(body))
+			req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+			req.Header.Set("X-Sync-Signature", sig)
+
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			if rr.Code != tc.expectedStatus {
+				t.Errorf("origin %q: expected status %d, got %d: %s", tc.origin, tc.expectedStatus, rr.Code, rr.Body.String())
+			}
+		})
+	}
+
+	// Verify that path/query stripping was applied: after registering with a URL
+	// that has a path, subsequent requests using the bare origin should be accepted.
+	t.Run("NormalizationApplied", func(t *testing.T) {
+		id := "origin-normalize-check"
+		secret := "norm-secret"
+		p := "/api/v1/sync/" + id
+		rawOrigin := "https://norm.example.com/app?ref=1"
+		canonicalOrigin := "https://norm.example.com"
+
+		body, _ := json.Marshal(models.SyncRequest{
+			Data:               "data",
+			RegistrationSecret: secret,
+			AllowedOrigin:      rawOrigin,
+		})
+		ts := time.Now().Unix()
+		sig := signRequest(t, secret, ts, "POST", p, body)
+		req := httptest.NewRequest("POST", p, bytes.NewBuffer(body))
+		req.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts))
+		req.Header.Set("X-Sync-Signature", sig)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("registration failed: got %d: %s", rr.Code, rr.Body.String())
+		}
+
+		// A GET with the canonical (path-less) origin must succeed
+		ts2 := time.Now().Unix() + 10
+		sig2 := signRequest(t, secret, ts2, "GET", p, nil)
+		req2 := httptest.NewRequest("GET", p, nil)
+		req2.Header.Set("X-Sync-Timestamp", fmt.Sprintf("%d", ts2))
+		req2.Header.Set("X-Sync-Signature", sig2)
+		req2.Header.Set("Origin", canonicalOrigin)
+		rr2 := httptest.NewRecorder()
+		router.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusOK {
+			t.Errorf("expected 200 with canonical origin after path-stripping, got %d: %s", rr2.Code, rr2.Body.String())
+		}
+	})
+}
+
 func TestStatsEndpoint(t *testing.T) {
 	s, err := store.NewSQLiteStore(":memory:", 10, "")
 	if err != nil {

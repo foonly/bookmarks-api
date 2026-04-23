@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -37,7 +38,8 @@ func NewHandler(s store.Store, statsToken string) *Handler {
 }
 
 // DynamicCORS is a middleware that sets the Access-Control-Allow-Origin header
-// based on the allowed_origin stored for the given sync ID.
+// based on the allowed_origin stored for the given sync ID, and enforces
+// server-side origin checking when an origin restriction is registered.
 func (h *Handler) DynamicCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
@@ -46,6 +48,17 @@ func (h *Handler) DynamicCORS(next http.Handler) http.Handler {
 			if err == nil && identity.AllowedOrigin != "" {
 				w.Header().Set("Access-Control-Allow-Origin", identity.AllowedOrigin)
 				w.Header().Set("Vary", "Origin")
+
+				// Server-side enforcement: CORS headers alone only prevent browsers
+				// from reading responses; they do not stop the request from being made.
+				// When a client sends an Origin header and the identity has a registered
+				// AllowedOrigin, reject any mismatch outright. Requests without an Origin
+				// header (e.g. native/CLI clients) are still allowed — they are already
+				// authenticated by the HMAC signature.
+				if reqOrigin := r.Header.Get("Origin"); reqOrigin != "" && reqOrigin != identity.AllowedOrigin {
+					http.Error(w, "origin not allowed", http.StatusForbidden)
+					return
+				}
 			} else {
 				// Fallback to allow all if no specific origin is registered
 				// or during registration phase.
@@ -207,6 +220,15 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 				origin = r.Header.Get("Origin")
 			}
 
+			if origin != "" {
+				normalized, err := parseAllowedOrigin(origin)
+				if err != nil {
+					http.Error(w, "invalid allowed_origin: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				origin = normalized
+			}
+
 			if err := h.store.CreateIdentity(r.Context(), id, req.RegistrationSecret, origin); err != nil {
 				slog.Error("Upload: failed to create identity", "id", id, "error", err)
 				http.Error(w, "failed to create identity", http.StatusInternalServerError)
@@ -361,6 +383,27 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.respondWithJSON(w, http.StatusOK, stats)
+}
+
+// parseAllowedOrigin validates and normalizes a candidate origin value for storage.
+// It returns the canonical "scheme://host[:port]" form, or an error if the value
+// is not a valid http/https origin. Wildcards are explicitly rejected.
+func parseAllowedOrigin(raw string) (string, error) {
+	if raw == "*" {
+		return "", fmt.Errorf("wildcard is not a valid allowed origin")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid origin: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("origin must use http or https scheme, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("origin must include a host")
+	}
+	// Return canonical form: scheme://host (strips any path, query string, or fragment)
+	return u.Scheme + "://" + u.Host, nil
 }
 
 func (h *Handler) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
